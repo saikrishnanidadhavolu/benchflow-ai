@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
+      APP_TIMEZONE: America/New_York
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Lint and typecheck
+        run: pnpm lint && pnpm typecheck
+      - name: Unit tests
+        run: pnpm test
+      - name: Start local Supabase (migrations + synthetic seed)
+        run: pnpm exec supabase start -x realtime,storage-api,imgproxy,studio,edge-runtime,logflare,vector,supavisor
+      - name: Database access-policy tests
+        run: pnpm db:test
+      - name: Build
+        run: |
+          export NEXT_PUBLIC_SUPABASE_ANON_KEY=$(pnpm exec supabase status -o env | grep '^ANON_KEY=' | cut -d= -f2- | tr -d '"')
+          echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY" >> "$GITHUB_ENV"
+          pnpm build
+      - name: E2E tests
+        run: |
+          pnpm --filter web exec playwright install --with-deps chromium
+          pnpm test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: apps/web/test-results
