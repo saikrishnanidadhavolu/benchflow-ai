@@ -2,10 +2,10 @@ import 'server-only';
 import { cache } from 'react';
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
+import { getMembership, membershipRedirect } from '@/lib/membership';
+import type { Role } from '@/lib/auth-roles';
 
-export type Role = 'owner' | 'admin' | 'recruiter' | 'viewer';
-export const WRITE_ROLES: Role[] = ['owner', 'admin', 'recruiter'];
-export const ADMIN_ROLES: Role[] = ['owner', 'admin'];
+export { ADMIN_ROLES, WRITE_ROLES, canWrite, type Role } from '@/lib/auth-roles';
 
 export interface AppContext {
   userId: string;
@@ -25,16 +25,9 @@ export const requireContext = cache(async (): Promise<AppContext> => {
   } = await supabase.auth.getUser();
   if (!user) redirect('/login');
 
-  const { data: membership } = await supabase
-    .from('user_roles')
-    .select('role, organization:organizations(id, name, is_demo)')
-    .eq('user_id', user.id)
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-
-  const org = membership?.organization as unknown as { id: string; name: string; is_demo: boolean } | null;
-  if (!membership || !org) redirect('/onboarding');
+  const membership = await getMembership(supabase, user.id);
+  const target = membershipRedirect(membership, 'app');
+  if (target || membership.kind !== 'member') redirect(target ?? '/onboarding');
 
   const { data: profile } = await supabase.from('users').select('display_name').eq('id', user.id).maybeSingle();
 
@@ -42,10 +35,10 @@ export const requireContext = cache(async (): Promise<AppContext> => {
     userId: user.id,
     email: user.email ?? '',
     displayName: profile?.display_name ?? user.email ?? 'User',
-    orgId: org.id,
-    orgName: org.name,
-    isDemoOrg: org.is_demo,
-    role: membership.role as Role,
+    orgId: membership.orgId,
+    orgName: membership.orgName,
+    isDemoOrg: membership.isDemoOrg,
+    role: membership.role,
   };
 });
 
@@ -61,5 +54,3 @@ export async function requireRole(roles: Role[]): Promise<AppContext> {
   if (!roles.includes(ctx.role)) throw new AuthorizationError();
   return ctx;
 }
-
-export const canWrite = (role: Role) => WRITE_ROLES.includes(role);
