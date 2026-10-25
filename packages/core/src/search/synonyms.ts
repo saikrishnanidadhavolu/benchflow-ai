@@ -23,6 +23,24 @@ export function normalizeState(input: string | null | undefined): string | null 
   return STATE_BY_NAME.get(v.toLowerCase()) ?? null;
 }
 
+/**
+ * State codes that are also common English words or IT abbreviations. These are never
+ * treated as states unless the user targets the location field (e.g. `state:IN`).
+ */
+export const AMBIGUOUS_STATE_CODES = new Set([
+  'AL', 'AR', 'CO', 'DE', 'HI', 'ID', 'IN', 'LA', 'MA', 'ME', 'MS', 'OH', 'OK', 'OR', 'PA', 'PR', 'SD',
+]);
+
+/**
+ * Returns the state code when a free-text term should be read as a US state: exactly two letters,
+ * typed in uppercase (e.g. "TX", not "tx"), a valid code, and not an ambiguous word like "IN" or "OR".
+ */
+export function stateCodeForFreeTextTerm(term: string): string | null {
+  if (!/^[A-Z]{2}$/.test(term)) return null;
+  if (!US_STATES[term] || AMBIGUOUS_STATE_CODES.has(term)) return null;
+  return term;
+}
+
 /** Built-in staffing vocabulary synonyms (in addition to skill aliases stored in the DB). */
 const BUILT_IN_GROUPS: string[][] = [
   ['c2c', 'corp to corp', 'corp-to-corp'],
@@ -82,11 +100,14 @@ export function expandSynonyms(node: QueryNode | null, index: SynonymIndex): Que
       if (node.prefix || node.field === 'status' || node.field === 'jobid') return node;
       const base = node.values[0]!;
       let values = index.expand(base);
-      // Bare 2-letter state codes only expand when targeting the location field;
-      // otherwise "IN" or "OR" would match far too broadly.
       if (node.field === 'location') {
+        // Explicit location field: any state code or name expands, including ambiguous ones like "IN".
         const code = normalizeState(base);
         if (code) values = [...new Set([...values, code, US_STATES[code]!])];
+      } else if (!node.field && !node.phrase) {
+        // Free text: only unambiguous uppercase codes ("TX", "NJ") also match the state name.
+        const code = stateCodeForFreeTextTerm(base);
+        if (code) values = [...new Set([...values, US_STATES[code]!])];
       }
       return { ...node, values };
     }
