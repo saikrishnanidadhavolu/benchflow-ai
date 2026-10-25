@@ -29,7 +29,7 @@ Requirements: Node 22, pnpm 9, Docker.
 
 ```bash
 pnpm install
-pnpm db:start                     # starts local Supabase, applies migrations + synthetic seed
+pnpm db:start                     # preflight checks + local Supabase (migrations + synthetic seed)
 cp .env.example apps/web/.env.local   # paste ANON_KEY from `pnpm exec supabase status`
 pnpm dev                          # http://localhost:3000
 ```
@@ -41,7 +41,7 @@ Demo logins (synthetic data, local only):
 | demo@benchflow.local | demo-password-123 | owner |
 | viewer@benchflow.local | demo-password-123 | viewer (read-only, no consultant data) |
 
-Or sign up a new account. You create an empty organization with no demo data. Local auth emails (magic links) show up in Mailpit at http://127.0.0.1:54324.
+Or sign up a new account: onboarding lets you create an empty organization (no demo data) or join an existing one with an invitation code from **User and Security Settings**. Local auth emails (magic links) show up in Mailpit at http://127.0.0.1:54324.
 
 ### Commands
 
@@ -51,7 +51,7 @@ Or sign up a new account. You create an empty organization with no demo data. Lo
 | `pnpm test` | Unit tests (core + web) |
 | `pnpm db:test` | Row-level-security / authorization tests against the local DB |
 | `pnpm test:e2e` | Playwright against `pnpm start` (run `pnpm build` first), or set `E2E_BASE_URL=http://localhost:3000` to reuse `pnpm dev` |
-| `pnpm db:reset` | Recreate the local DB from migrations + seed |
+| `pnpm db:reset` | Recreate the local DB from migrations + seed (wipes local data; not a fix for startup errors) |
 
 ## Search syntax
 
@@ -59,6 +59,7 @@ Or sign up a new account. You create an empty organization with no demo data. Lo
 
 - Operators: `AND` (or just a space), `OR`, `NOT` / leading `-`, parentheses, `"phrases"`, trailing `*` for a prefix match.
 - Fields: `title:` `skill:` `state:`/`location:` `vendor:` `prime:` `partner:` `client:` `company:` `source:` `sender:` `recruiter:` `jobid:` `status:` `type:`
+- Two-letter terms: an **uppercase** state code typed as free text (`TX`, `NJ`) also matches the state name (`Texas`). Lowercase (`tx`), quoted (`"TX"`), and codes that are also common words (`IN`, `OR`, `ME`, `OK`, `HI`, `CO`, `PA`, `MS`, `LA`, …) stay literal. To force a state, use `state:IN` or the States filter. Other two-letter keywords (`QA`, `AI`, `BA`) are matched literally.
 - Synonyms: skill aliases from the `skills`/`skill_aliases` tables (e.g. `k8s` → Kubernetes, `reactjs` → React), staffing terms (`C2C` ↔ corp-to-corp, `H1B` ↔ H-1B), state names ↔ codes.
 - Filters: source type, source, date range, received within, state, skills, work arrangement, employment type, tax terms, vendor, status. All search state is in the URL, so the Back button returns to the same results.
 
@@ -88,7 +89,8 @@ Fuzzy matches are never merged automatically. Reviewers choose "Mark as duplicat
 - [x] Security headers (HSTS, frame-deny, nosniff, referrer policy); open-redirect-safe `next` param
 - [x] No secrets in the repo; `.env*.local` ignored
 - [ ] Phase 2: encrypted OAuth tokens in Supabase Vault, token revocation on disconnect
-- [ ] Phase 6: malware scanning for uploads, shared rate limiter, backups/PITR verification, member invitations, data-retention jobs
+- [x] Single-use, expiring invitation codes (only a SHA-256 hash is stored); joining requires a valid code
+- [ ] Phase 6: malware scanning for uploads, shared rate limiter, backups/PITR verification, data-retention jobs
 
 Backups: enable Supabase daily backups (PITR on Pro) and test a restore into a staging project each quarter.
 
@@ -104,8 +106,25 @@ Backups: enable Supabase daily backups (PITR on Pro) and test a restore into a s
 | CareerBuilder / Monster | Access to be confirmed with the current owner |
 | USAJOBS, Adzuna | Free API keys |
 
+## Supabase startup
+
+`pnpm db:start` runs `scripts/supabase-start.mjs`:
+
+1. Checks the Docker CLI and daemon, plus free disk space.
+2. Exits early if the stack is already running.
+3. Probes both registries for the pinned Postgres image (anonymous token plus manifest request) and prints e.g. `public.ecr.aws: throttled, ghcr.io: ok`.
+4. Runs `supabase start` and sorts any failure into one of these categories: docker, registry throttling, missing image, registry auth, network, disk, ports, or migration SQL. Each category prints specific next steps.
+5. Retries only transient failures (throttling, network), with backoff. Set `SUPABASE_START_RETRIES` to change the attempt count (default 3).
+
+It never resets the database. It never changes registry settings unless you pass `--registry=ghcr.io`, which sets `SUPABASE_INTERNAL_IMAGE_REGISTRY` for that run only.
+
+**`Data limit exceeded` / `toomanyrequests` while pulling.** The CLI pulls from `public.ecr.aws` first. ECR Public returns HTTP 429 when the anonymous pull quota for your IP is used up (this happens often on shared CI or VM addresses). The CLI then retries and falls back to `ghcr.io`, so startup usually still succeeds, just slower. It is not a Docker or project misconfiguration. Options:
+
+- Wait a few minutes, then re-run.
+- Authenticate to raise the quota: `aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws`.
+- Opt in to GHCR for one run: `pnpm db:start --registry=ghcr.io`.
+
 ## Troubleshooting
 
-- **`supabase start` fails pulling images**: retry. The CLI falls back from ECR to GHCR.
-- **Redirect loop to /onboarding**: the user has no organization membership. Finish onboarding, or run `pnpm db:reset` locally.
-- **Search returns nothing for a 2-letter word**: bare state codes only expand with `state:`, e.g. `state:IN`.
+- **Sent back to /onboarding**: the account has no organization. Create one or join with an invitation code. If the page says your membership could not be loaded, an owner of that organization needs to check it. The app never bounces between /onboarding and the dashboard, because both use the same membership check (`apps/web/src/lib/membership.ts`).
+- **Search returns nothing for a 2-letter word**: see "Two-letter terms" above. Use `state:XX` or the States filter for ambiguous codes.
